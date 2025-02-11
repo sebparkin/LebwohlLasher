@@ -231,7 +231,7 @@ def get_order(arr,nmax, grid, comm):
         eigenvalues,eigenvectors = np.linalg.eig(Qab)
         return eigenvalues.max()
 #=======================================================================
-def MC_step(arr,Ts,nmax):
+def MC_step(arr,Ts,nmax, grid, comm):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -254,29 +254,43 @@ def MC_step(arr,Ts,nmax):
     # with temperature.
     scale=0.1+Ts
     accept = 0
+
+    rank = comm.Get_rank()
+    size = comm.Get_size()
+    #randomness has to be removed to allow it to be multi cored
+    #otherwise two cores could work on the same node
+    #its also very difficult to combine
+    '''
     xran = np.random.randint(0,high=nmax, size=(nmax,nmax))
     yran = np.random.randint(0,high=nmax, size=(nmax,nmax))
+    '''
     aran = np.random.normal(scale=scale, size=(nmax,nmax))
-    for i in range(nmax):
-        for j in range(nmax):
-            ix = xran[i,j]
-            iy = yran[i,j]
-            ang = aran[i,j]
-            en0 = one_energy(arr,ix,iy,nmax)
-            arr[ix,iy] += ang
-            en1 = one_energy(arr,ix,iy,nmax)
-            if en1<=en0:
+    for i, j in grid:
+        ang = aran[i,j]
+        en0 = one_energy(arr,i,j,nmax)
+        arr[i,j] += ang
+        en1 = one_energy(arr,i,j,nmax)
+        if en1<=en0:
+            accept += 1
+        else:
+        # Now apply the Monte Carlo test - compare
+        # exp( -(E_new - E_old) / T* ) >= rand(0,1)
+            boltz = np.exp( -(en1 - en0) / Ts )
+
+            if boltz >= np.random.uniform(0.0,1.0):
                 accept += 1
             else:
-            # Now apply the Monte Carlo test - compare
-            # exp( -(E_new - E_old) / T* ) >= rand(0,1)
-                boltz = np.exp( -(en1 - en0) / Ts )
+                arr[i,j] -= ang
 
-                if boltz >= np.random.uniform(0.0,1.0):
-                    accept += 1
-                else:
-                    arr[ix,iy] -= ang
-    return accept/(nmax*nmax)
+    #gather all of the local arrs into one
+    #done by splitting the array by the section they have worked on
+    comm.Barrier()
+    split_arr = np.array_split(arr.reshape(nmax*nmax), size)
+    gathered_arr = comm.gather(split_arr[rank], root=0)
+    if rank == 0:
+      arr = np.concatenate(gathered_arr).reshape(nmax, nmax)
+
+      return accept/(nmax*nmax)
 #=======================================================================
 def main(program, nsteps, nmax, temp, pflag):
     """
@@ -308,24 +322,11 @@ def main(program, nsteps, nmax, temp, pflag):
     #scatters local grid to each of the cores
     local_grid = comm.scatter(split_grid, root=0)
 
-    #creates chunks, start, and end variables
-    '''
-    chunk_size = nmax*nmax//size
-    start = rank*chunk_size
-    end = (rank+1) * chunk_size if rank != size-1 else nmax*nmax
-    print(start, end)
-    '''
-
     # Create and initialise lattice
     lattice = initdat(nmax)
     # Plot initial frame of lattice
     plotdat(lattice,pflag,nmax)
     # Create arrays to store energy, acceptance ratio and order parameter
-    '''
-    energy = np.zeros(nsteps+1,dtype=np.dtype)
-    ratio = np.zeros(nsteps+1,dtype=np.dtype)
-    order = np.zeros(nsteps+1,dtype=np.dtype)
-    '''
     energy = np.zeros(nsteps+1)
     ratio = np.zeros(nsteps+1)
     order = np.zeros(nsteps+1)
@@ -338,8 +339,7 @@ def main(program, nsteps, nmax, temp, pflag):
     if rank == 0:
         initial = time.time()
     for it in range(1,nsteps+1):
-        if rank == 0:
-            ratio[it] = MC_step(lattice,temp,nmax)
+        ratio[it] = MC_step(lattice,temp,nmax, local_grid, comm)
         energy[it] = all_energy(lattice, nmax, local_grid, comm)
         order[it] = get_order(lattice, nmax, local_grid, comm)
     if rank == 0:

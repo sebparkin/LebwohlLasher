@@ -177,7 +177,7 @@ def all_energy(arr,nmax, grid, comm):
     rank = comm.Get_rank()
 
 
-    print(f'Process: all_energy, Core number is: {rank}, lattice loc is: {grid[0]}')
+    #print(f'Process: all_energy, Core number is: {rank}, lattice loc is: {grid[0]}')
 
     enall = 0.0
     for i, j in grid:
@@ -208,7 +208,7 @@ def get_order(arr,nmax, grid, comm):
 
     rank = comm.Get_rank()
 
-    print(f'Process: get_order, Core number is: {rank}, lattice loc is: {grid[0]}')
+    #print(f'Process: get_order, Core number is: {rank}, lattice loc is: {grid[0]}')
 
 
     Qab = np.zeros((3,3))

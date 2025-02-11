@@ -192,6 +192,8 @@ def all_energy(arr,nmax, grid, comm):
     '''
     if rank == 0:
         return r_enall
+    else:
+        return None
 #=======================================================================
 def get_order(arr,nmax, grid, comm):
     """
@@ -230,6 +232,8 @@ def get_order(arr,nmax, grid, comm):
     
         eigenvalues,eigenvectors = np.linalg.eig(Qab)
         return eigenvalues.max()
+    else:
+        return None
 #=======================================================================
 def MC_step(arr,Ts,nmax):
     """

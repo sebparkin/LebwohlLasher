@@ -192,6 +192,8 @@ def all_energy(arr,nmax, grid, comm):
     '''
     if rank == 0:
         return r_enall
+    else:
+        return None
 #=======================================================================
 def get_order(arr,nmax, grid, comm):
     """
@@ -230,6 +232,8 @@ def get_order(arr,nmax, grid, comm):
     
         eigenvalues,eigenvectors = np.linalg.eig(Qab)
         return eigenvalues.max()
+    else:
+        return None
 #=======================================================================
 def MC_step(arr,Ts,nmax, grid, comm):
     """
@@ -282,15 +286,13 @@ def MC_step(arr,Ts,nmax, grid, comm):
             else:
                 arr[i,j] -= ang
 
-    #gather all of the local arrs into one
-    #done by splitting the array by the section they have worked on
+    #gather all of the local accepts into one
     comm.Barrier()
-    split_arr = np.array_split(arr.reshape(nmax*nmax), size)
-    gathered_arr = comm.gather(split_arr[rank], root=0)
+    total_accept = comm.reduce(accept, op=MPI.SUM, root = 0)
     if rank == 0:
-      arr = np.concatenate(gathered_arr).reshape(nmax, nmax)
-
-      return accept/(nmax*nmax)
+      return total_accept/(nmax*nmax)
+    else:
+        return None
 #=======================================================================
 def main(program, nsteps, nmax, temp, pflag):
     """
@@ -325,7 +327,8 @@ def main(program, nsteps, nmax, temp, pflag):
     # Create and initialise lattice
     lattice = initdat(nmax)
     # Plot initial frame of lattice
-    plotdat(lattice,pflag,nmax)
+    if rank == 0:
+        plotdat(lattice,pflag,nmax)
     # Create arrays to store energy, acceptance ratio and order parameter
     energy = np.zeros(nsteps+1)
     ratio = np.zeros(nsteps+1)
@@ -342,11 +345,17 @@ def main(program, nsteps, nmax, temp, pflag):
         ratio[it] = MC_step(lattice,temp,nmax, local_grid, comm)
         energy[it] = all_energy(lattice, nmax, local_grid, comm)
         order[it] = get_order(lattice, nmax, local_grid, comm)
+        #gather all of the local arrs into one
+        #done by splitting the array by the section they have worked on
+        comm.Barrier()
+        split_arr = np.array_split(lattice.reshape(nmax*nmax), size)
+        gathered_arr = comm.gather(split_arr[rank], root=0)
+        if rank == 0:
+            lattice = np.concatenate(gathered_arr).reshape(nmax, nmax)
+
     if rank == 0:
         final = time.time()
         runtime = final-initial
-        energy = comm.bcast(energy, root = 0)
-        #order = comm.bcast
 
         # Final outputs
         print("{}: Size: {:d}, Steps: {:d}, T*: {:5.3f}: Order: {:5.3f}, Time: {:8.6f} s".format(program, nmax,nsteps,temp,order[nsteps-1],runtime))

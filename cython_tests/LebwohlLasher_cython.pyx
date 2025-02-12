@@ -23,10 +23,14 @@ SH 16-Oct-23
 """
 #cython: language_level=3
 
-cimport cython
-# from libc.math import sqrt, sin, cos
+import math
+import numpy as np
+from libc.math cimport sqrt
+from libc.math cimport cos as ccos
+from libc.math cimport pow as cpow
+from libc.math cimport exp as cexp
 cimport numpy as cnp
-cnp.import_array()
+from cython.parallel import prange
 
 import sys
 import time
@@ -134,7 +138,7 @@ def savedat(arr,nsteps,Ts,runtime,ratio,energy,order,nmax):
         print("   {:05d}    {:6.4f} {:12.4f}  {:6.4f} ".format(i,ratio[i],energy[i],order[i]),file=FileOut)
     FileOut.close()
 #=======================================================================
-cdef double one_energy(double[:,:] arr, int ix,int iy, int nmax) noexcept nogil:
+cdef double one_energy(double[:,:] arr, int ix ,int iy, int nmax) noexcept nogil:
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -154,21 +158,21 @@ cdef double one_energy(double[:,:] arr, int ix,int iy, int nmax) noexcept nogil:
     cdef int ixm = (ix-1)%nmax # of the neighbours
     cdef int iyp = (iy+1)%nmax # with wraparound
     cdef int iym = (iy-1)%nmax #
-#
-# Add together the 4 neighbour contributions
-# to the energy
-#
+    #
+    # Add together the 4 neighbour contributions
+    # to the energy
+    #
     ang = arr[ix,iy]-arr[ixp,iy]
-    en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
+    en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     ang = arr[ix,iy]-arr[ixm,iy]
-    en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
+    en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     ang = arr[ix,iy]-arr[ix,iyp]
-    en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
+    en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     ang = arr[ix,iy]-arr[ix,iym]
-    en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
+    en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     return en
 #=======================================================================
-def all_energy(double[:,:] arr, int nmax):
+def all_energy(double[:,:] arr, int nmax, int[:,:] grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -180,12 +184,15 @@ def all_energy(double[:,:] arr, int nmax):
 	  enall (float) = reduced energy of lattice.
     """
     cdef float enall = 0.0
-    for i in range(0, nmax):
-        for j in range(0, nmax):
-            enall += one_energy(arr,i,j,nmax)
+    cdef int i, j, k
+
+    for k in prange(nmax*nmax, nogil=True, num_threads=4):
+        i = grid[k][0]
+        j = grid[k][1]
+        enall += one_energy(arr,i,j,nmax)
     return enall
 #=======================================================================
-cpdef get_order(double[:,:] arr, int nmax):
+cpdef get_order(double[:,:] arr, int nmax, int[:,:] grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -197,7 +204,8 @@ cpdef get_order(double[:,:] arr, int nmax):
 	Returns:
 	  max(eigenvalues(Qab)) (float) = order parameter for lattice.
     """
-
+    grid3 = np.array(np.mgrid[0:3,0:3].reshape(2,-1).T, dtype=np.int32)
+    cdef int[:,:] grid3_view = grid3
 
     Qab = np.zeros((3,3), dtype=np.double)
     delta = np.eye(3,3, dtype=np.double)
@@ -210,18 +218,20 @@ cpdef get_order(double[:,:] arr, int nmax):
     #
     lab = np.vstack((np.cos(arr),np.sin(arr),np.zeros_like(arr)), dtype = np.double).reshape(3,nmax,nmax)
     cdef double[:,:,:] lab_view = lab
+    cdef int a, b, c, i, j, k
 
-    with nogil:
-        for a in range(3):
-            for b in range(3):
-                for i in range(nmax):
-                    for j in range(nmax):
-                        Qab_view[a,b] += 3*lab_view[a,i,j]*lab_view[b,i,j] - delta_view[a,b]
+    for c in prange(9, nogil=True, num_threads=4):
+        a = grid3_view[c][0]
+        b = grid3_view[c][1]
+        for k in range(nmax*nmax):
+            i = grid[k][0]
+            j = grid[k][1]
+            Qab_view[a,b] += 3*lab_view[a,i,j]*lab_view[b,i,j] - delta_view[a,b]
     Qab = Qab/(2*nmax*nmax)
     eigenvalues,eigenvectors = np.linalg.eig(Qab)
     return eigenvalues.max()
 #=======================================================================
-cpdef MC_step(arr,float Ts, int nmax):
+cpdef MC_step(double[:,:] arr,float Ts, int nmax, int[:,:] grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -242,36 +252,44 @@ cpdef MC_step(arr,float Ts, int nmax):
     # using lots of individual calls.  "scale" sets the width
     # of the distribution for the angle changes - increases
     # with temperature.
+
     cdef float scale=0.1+Ts
-    cdef double accept = 0
-    xran = np.random.randint(0,high=nmax, size=(nmax,nmax), dtype = np.int32)
-    yran = np.random.randint(0,high=nmax, size=(nmax,nmax), dtype = np.int32)
-    aran = np.random.normal(scale=scale, size=(nmax,nmax))
-    cdef int[:,:] xran_view = xran
-    cdef int[:,:] yran_view = yran
-    cdef double[:,:] aran_view = aran
-    cdef int ix = 0, iy = 0
+    
+    xran = np.random.randint(0,high=nmax, size=(nmax*nmax), dtype = np.int32)
+    yran = np.random.randint(0,high=nmax, size=(nmax*nmax), dtype = np.int32)
+    aran = np.random.normal(scale=scale, size=(nmax*nmax))
+    cdef int[::1] xran_view = xran
+    cdef int[::1] yran_view = yran
+    cdef double[::1] aran_view = aran
+
+    uniran = np.random.uniform(0.0, 1.0, size = nmax*nmax)
+    cdef double[::1] uniran_view = uniran
+
+    cdef int ix = 0, iy = 0, f, i, j
     cdef double ang, en0, en1, boltz
+    cdef float accept = 0.0
 
-    for i in range(nmax):
-        for j in range(nmax):
-            ix = xran_view[i,j]
-            iy = yran_view[i,j]
-            ang = aran_view[i,j]
-            en0 = one_energy(arr,ix,iy,nmax)
-            arr[ix,iy] += ang
-            en1 = one_energy(arr,ix,iy,nmax)
-            if en1<=en0:
-                accept += 1
+    for f in prange(nmax*nmax, nogil=True, num_threads=4):
+        accept += 0.0
+        ix = xran_view[f]
+        iy = yran_view[f]
+        ang = aran_view[f]
+        en0 = one_energy(arr,ix,iy,nmax)
+        arr[ix,iy] += ang
+        en1 = one_energy(arr,ix,iy,nmax)
+        if en1<=en0:
+            accept += 1.0
+        else:
+            accept += 0.0
+        # Now apply the Monte Carlo test - compare
+        # exp( -(E_new - E_old) / T* ) >= rand(0,1)
+            boltz = cexp( -(en1 - en0) / Ts )
+
+            if boltz >= uniran_view[f]:
+                accept += 1.0
             else:
-            # Now apply the Monte Carlo test - compare
-            # exp( -(E_new - E_old) / T* ) >= rand(0,1)
-                boltz = np.exp( -(en1 - en0) / Ts )
-
-                if boltz >= np.random.uniform(0.0,1.0):
-                    accept += 1
-                else:
-                    arr[ix,iy] -= ang
+                arr[ix,iy] -= ang
+                accept += 0.0
     return accept/(nmax*nmax)
 #=======================================================================
 def main(str program, int nsteps, int nmax, float temp, int pflag):
@@ -287,6 +305,10 @@ def main(str program, int nsteps, int nmax, float temp, int pflag):
     Returns:
       NULL
     """
+    #creates xy grid, 2 x nmax squared array for iterating through all x and y values
+    grid = np.array(np.mgrid[0:nmax,0:nmax].reshape(2,-1).T, dtype=np.int32)
+    cdef int[:,:] grid_view = grid
+
     # Create and initialise lattice
     lattice = initdat(nmax)
     cdef double[:,:] lattice_view = lattice
@@ -305,16 +327,16 @@ def main(str program, int nsteps, int nmax, float temp, int pflag):
     cdef double[::1] ratio_view = ratio
     cdef double[::1] order_view = order
     # Set initial values in arrays
-    energy_view[0] = all_energy(lattice_view,nmax)
+    energy_view[0] = all_energy(lattice_view,nmax, grid_view)
     ratio_view[0] = 0.5 # ideal value
-    order_view[0] = get_order(lattice_view,nmax)
+    order_view[0] = get_order(lattice_view,nmax, grid_view)
 
     # Begin doing and timing some MC steps.
     cdef double initial = time.time()
     for it in range(1,nsteps+1):
-        ratio_view[it] = MC_step(lattice_view,temp,nmax)
-        energy_view[it] = all_energy(lattice_view,nmax)
-        order_view[it] = get_order(lattice_view,nmax)
+        ratio_view[it] = MC_step(lattice_view,temp,nmax, grid_view)
+        energy_view[it] = all_energy(lattice_view,nmax, grid_view)
+        order_view[it] = get_order(lattice_view,nmax, grid_view)
     cdef double final = time.time()
     cdef double runtime = final-initial
     

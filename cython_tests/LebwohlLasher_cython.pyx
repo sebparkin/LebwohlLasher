@@ -25,6 +25,7 @@ SH 16-Oct-23
 
 import math
 import numpy as np
+import cython
 from libc.math cimport sqrt
 from libc.math cimport cos as ccos
 from libc.math cimport pow as cpow
@@ -138,6 +139,7 @@ def savedat(arr,nsteps,Ts,runtime,ratio,energy,order,nmax):
         print("   {:05d}    {:6.4f} {:12.4f}  {:6.4f} ".format(i,ratio[i],energy[i],order[i]),file=FileOut)
     FileOut.close()
 #=======================================================================
+@cython.boundscheck(False) 
 cdef double one_energy(double[:,:] arr, int ix ,int iy, int nmax) noexcept nogil:
     """
     Arguments:
@@ -172,7 +174,8 @@ cdef double one_energy(double[:,:] arr, int ix ,int iy, int nmax) noexcept nogil
     en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     return en
 #=======================================================================
-def all_energy(double[:,:] arr, int nmax, int[:,:] grid):
+@cython.boundscheck(False) 
+cdef float all_energy(double[:,:] arr, int nmax, int[:,:] grid) noexcept nogil:
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -186,13 +189,14 @@ def all_energy(double[:,:] arr, int nmax, int[:,:] grid):
     cdef float enall = 0.0
     cdef int i, j, k
 
-    for k in prange(nmax*nmax, nogil=True, num_threads=4):
+    for k in prange(nmax*nmax, num_threads=4):
         i = grid[k][0]
         j = grid[k][1]
         enall += one_energy(arr,i,j,nmax)
     return enall
 #=======================================================================
-cpdef get_order(double[:,:] arr, int nmax, int[:,:] grid):
+@cython.boundscheck(False) 
+def get_order(double[:,:] arr, int nmax, int[:,:] grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -231,7 +235,8 @@ cpdef get_order(double[:,:] arr, int nmax, int[:,:] grid):
     eigenvalues,eigenvectors = np.linalg.eig(Qab)
     return eigenvalues.max()
 #=======================================================================
-cpdef MC_step(double[:,:] arr,float Ts, int nmax, int[:,:] grid):
+@cython.boundscheck(False)
+def MC_step(double[:,:] arr,float Ts, int nmax, int[:,:] grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;

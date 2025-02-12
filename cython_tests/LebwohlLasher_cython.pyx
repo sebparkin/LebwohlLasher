@@ -134,7 +134,7 @@ def savedat(arr,nsteps,Ts,runtime,ratio,energy,order,nmax):
         print("   {:05d}    {:6.4f} {:12.4f}  {:6.4f} ".format(i,ratio[i],energy[i],order[i]),file=FileOut)
     FileOut.close()
 #=======================================================================
-def one_energy(cnp.ndarray arr,int ix,int iy,int nmax):
+cdef double one_energy(double[:,:] arr, int ix,int iy, int nmax) noexcept nogil:
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -168,7 +168,7 @@ def one_energy(cnp.ndarray arr,int ix,int iy,int nmax):
     en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
     return en
 #=======================================================================
-def all_energy(cnp.ndarray arr, int nmax):
+def all_energy(double[:,:] arr, int nmax):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -180,12 +180,12 @@ def all_energy(cnp.ndarray arr, int nmax):
 	  enall (float) = reduced energy of lattice.
     """
     cdef float enall = 0.0
-    for i in range(nmax):
-        for j in range(nmax):
+    for i in range(0, nmax):
+        for j in range(0, nmax):
             enall += one_energy(arr,i,j,nmax)
     return enall
 #=======================================================================
-def get_order(cnp.ndarray arr, int nmax):
+cpdef get_order(double[:,:] arr, int nmax):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -199,23 +199,29 @@ def get_order(cnp.ndarray arr, int nmax):
     """
 
 
-    cdef cnp.ndarray Qab = np.zeros((3,3), dtype=np.double)
-    cdef cnp.ndarray delta = np.eye(3,3, dtype=np.double)
+    Qab = np.zeros((3,3), dtype=np.double)
+    delta = np.eye(3,3, dtype=np.double)
+    cdef double[:,:] Qab_view = Qab
+    cdef double[:,:] delta_view = delta
+
     #
     # Generate a 3D unit vector for each cell (i,j) and
     # put it in a (3,i,j) array.
     #
-    cdef cnp.ndarray lab = np.vstack((np.cos(arr),np.sin(arr),np.zeros_like(arr)), dtype = np.double).reshape(3,nmax,nmax)
-    for a in range(3):
-        for b in range(3):
-            for i in range(nmax):
-                for j in range(nmax):
-                    Qab[a,b] += 3*lab[a,i,j]*lab[b,i,j] - delta[a,b]
+    lab = np.vstack((np.cos(arr),np.sin(arr),np.zeros_like(arr)), dtype = np.double).reshape(3,nmax,nmax)
+    cdef double[:,:,:] lab_view = lab
+
+    with nogil:
+        for a in range(3):
+            for b in range(3):
+                for i in range(nmax):
+                    for j in range(nmax):
+                        Qab_view[a,b] += 3*lab_view[a,i,j]*lab_view[b,i,j] - delta_view[a,b]
     Qab = Qab/(2*nmax*nmax)
     eigenvalues,eigenvectors = np.linalg.eig(Qab)
     return eigenvalues.max()
 #=======================================================================
-def MC_step(cnp.ndarray arr,float Ts, int nmax):
+cpdef MC_step(arr,float Ts, int nmax):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -238,20 +244,20 @@ def MC_step(cnp.ndarray arr,float Ts, int nmax):
     # with temperature.
     cdef float scale=0.1+Ts
     cdef double accept = 0
-    cdef cnp.ndarray xran = np.random.randint(0,high=nmax, size=(nmax,nmax), dtype = np.int64)
-    cdef cnp.ndarray yran = np.random.randint(0,high=nmax, size=(nmax,nmax), dtype = np.int64)
-    cdef cnp.ndarray aran = np.random.normal(scale=scale, size=(nmax,nmax))
-    cdef int ix = 0
-    cdef int iy = 0
-    cdef double ang
-    cdef double en0
-    cdef double en1
-    cdef double boltz
+    xran = np.random.randint(0,high=nmax, size=(nmax,nmax), dtype = np.int32)
+    yran = np.random.randint(0,high=nmax, size=(nmax,nmax), dtype = np.int32)
+    aran = np.random.normal(scale=scale, size=(nmax,nmax))
+    cdef int[:,:] xran_view = xran
+    cdef int[:,:] yran_view = yran
+    cdef double[:,:] aran_view = aran
+    cdef int ix = 0, iy = 0
+    cdef double ang, en0, en1, boltz
+
     for i in range(nmax):
         for j in range(nmax):
-            ix = xran[i,j]
-            iy = yran[i,j]
-            ang = aran[i,j]
+            ix = xran_view[i,j]
+            iy = yran_view[i,j]
+            ang = aran_view[i,j]
             en0 = one_energy(arr,ix,iy,nmax)
             arr[ix,iy] += ang
             en1 = one_energy(arr,ix,iy,nmax)
@@ -282,7 +288,8 @@ def main(str program, int nsteps, int nmax, float temp, int pflag):
       NULL
     """
     # Create and initialise lattice
-    cdef cnp.ndarray lattice = initdat(nmax)
+    lattice = initdat(nmax)
+    cdef double[:,:] lattice_view = lattice
     # Plot initial frame of lattice
     plotdat(lattice,pflag,nmax)
     # Create arrays to store energy, acceptance ratio and order parameter
@@ -291,20 +298,23 @@ def main(str program, int nsteps, int nmax, float temp, int pflag):
     ratio = np.zeros(nsteps+1,dtype=np.dtype)
     order = np.zeros(nsteps+1,dtype=np.dtype)
     '''
-    cdef cnp.ndarray energy = np.zeros(nsteps+1, dtype=np.double)
-    cdef cnp.ndarray ratio = np.zeros(nsteps+1, dtype=np.double)
-    cdef cnp.ndarray order = np.zeros(nsteps+1, dtype=np.double)
+    energy = np.zeros(nsteps+1, dtype=np.double)
+    ratio = np.zeros(nsteps+1, dtype=np.double)
+    order = np.zeros(nsteps+1, dtype=np.double)
+    cdef double[::1] energy_view = energy
+    cdef double[::1] ratio_view = ratio
+    cdef double[::1] order_view = order
     # Set initial values in arrays
-    energy[0] = all_energy(lattice,nmax)
-    ratio[0] = 0.5 # ideal value
-    order[0] = get_order(lattice,nmax)
+    energy_view[0] = all_energy(lattice_view,nmax)
+    ratio_view[0] = 0.5 # ideal value
+    order_view[0] = get_order(lattice_view,nmax)
 
     # Begin doing and timing some MC steps.
     cdef double initial = time.time()
     for it in range(1,nsteps+1):
-        ratio[it] = MC_step(lattice,temp,nmax)
-        energy[it] = all_energy(lattice,nmax)
-        order[it] = get_order(lattice,nmax)
+        ratio_view[it] = MC_step(lattice_view,temp,nmax)
+        energy_view[it] = all_energy(lattice_view,nmax)
+        order_view[it] = get_order(lattice_view,nmax)
     cdef double final = time.time()
     cdef double runtime = final-initial
     

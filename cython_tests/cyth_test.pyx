@@ -40,15 +40,12 @@ def get_order(cnp.ndarray arr, int nmax):
 
 
     cdef cnp.ndarray Qab = np.zeros((3,3), dtype=DTYPE)
-    #cdef double[:,:] Qab_view = Qab
     cdef cnp.ndarray delta = np.eye(3,3, dtype=DTYPE)
-    #cdef double[:,:] delta_view = delta
     #
     # Generate a 3D unit vector for each cell (i,j) and
     # put it in a (3,i,j) array.
     #
     cdef cnp.ndarray lab = np.vstack((np.cos(arr),np.sin(arr),np.zeros_like(arr)), dtype = DTYPE).reshape(3,nmax,nmax)
-    #cdef double[:,:,:] lab_view = lab
     for a in range(3):
         for b in range(3):
             for i in range(nmax):

@@ -1,5 +1,6 @@
 import LL_cython_mpi
 import sys
+from mpi4py import MPI
 
 def main(program, iterations, nmax, T, pflag):
 
@@ -18,5 +19,6 @@ if __name__ == '__main__':
         TEMPERATURE = float(sys.argv[3])
         PLOTFLAG = int(sys.argv[4])
         main(PROGNAME, ITERATIONS, SIZE, TEMPERATURE, PLOTFLAG)
+        MPI.Finalize()
     else:
         print("Usage: python {} <ITERATIONS> <SIZE> <TEMPERATURE> <PLOTFLAG>".format(sys.argv[0]))

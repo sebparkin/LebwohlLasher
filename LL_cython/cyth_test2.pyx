@@ -29,6 +29,7 @@ cdef double one_energy(double[:,:] arr, int ix, int iy, int nmax) noexcept nogil
     ang = arr[ix,iy]-arr[ix,iym]
     en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     return en
+
 @cython.boundscheck(False)    
 cdef double all_energy(double[:,:] arr, int nmax, int[:,:] grid):
     cdef float enall = 0.0

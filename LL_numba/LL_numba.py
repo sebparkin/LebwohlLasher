@@ -201,11 +201,11 @@ def get_order(arr,nmax):
     # put it in a (3,i,j) array.
     #
     lab = np.vstack((np.cos(arr),np.sin(arr),np.zeros_like(arr))).reshape(3,nmax,nmax)
+
+    #this numpy vectorisation was quicker than changing to a numba jit function, kept it here
     for a in range(3):
         for b in range(3):
-            for i in range(nmax):
-                for j in range(nmax):
-                    Qab[a,b] += np.sum(3*lab[a,i,j]*lab[b,i,j] - delta[a,b])
+            Qab[a,b] += np.sum(3*lab[a,:,:]*lab[b,:,:] - delta[a,b])
     Qab = Qab/(2*nmax*nmax)
     eigenvalues,eigenvectors = np.linalg.eig(Qab)
     return eigenvalues.max()
@@ -232,10 +232,16 @@ def MC_step(arr,Ts,nmax):
     # of the distribution for the angle changes - increases
     # with temperature.
     scale=0.1+Ts
-    accept = 0
     xran = np.random.randint(0,high=nmax, size=(nmax,nmax))
     yran = np.random.randint(0,high=nmax, size=(nmax,nmax))
     aran = np.random.normal(scale=scale, size=(nmax,nmax))
+
+    accept = MC_step_loop(arr, nmax, Ts, xran, yran, aran)
+    return accept/(nmax*nmax)
+#=======================================================================
+@numba.jit()
+def MC_step_loop(arr, nmax, Ts, xran, yran, aran):
+    accept = 0
     for i in range(nmax):
         for j in range(nmax):
             ix = xran[i,j]
@@ -255,7 +261,7 @@ def MC_step(arr,Ts,nmax):
                     accept += 1
                 else:
                     arr[ix,iy] -= ang
-    return accept/(nmax*nmax)
+    return accept
 #=======================================================================
 def main(program, nsteps, nmax, temp, pflag):
     """

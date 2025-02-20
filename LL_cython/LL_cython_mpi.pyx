@@ -399,6 +399,7 @@ def main(str program, int nsteps, int nmax, float temp, int pflag):
         gathered_arr = comm.gather(split_arr[rank], root=0)
         if rank == 0:
             lattice = np.concatenate(gathered_arr).reshape(nmax, nmax)
+            lattice_view = lattice
 
     if rank == 0:
         final = time.time()

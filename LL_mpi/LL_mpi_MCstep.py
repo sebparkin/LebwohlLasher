@@ -163,7 +163,7 @@ def one_energy(arr,ix,iy,nmax):
     en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
     return en
 #=======================================================================
-def all_energy(arr,nmax, grid, comm):
+def all_energy(arr,nmax, grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -174,7 +174,6 @@ def all_energy(arr,nmax, grid, comm):
 	Returns:
 	  enall (float) = reduced energy of lattice.
     """
-    rank = comm.Get_rank()
 
 
     #print(f'Process: all_energy, Core number is: {rank}, lattice loc is: {grid[0]}')
@@ -182,20 +181,10 @@ def all_energy(arr,nmax, grid, comm):
     enall = 0.0
     for i, j in grid:
         enall += one_energy(arr,i,j,nmax)
-    
-    comm.Barrier()
-    r_enall = comm.reduce(enall, op=MPI.SUM, root=0)
-    '''
-    for i in range(nmax):
-        for j in range(nmax):
-            enall += one_energy(arr,i,j,nmax)
-    '''
-    if rank == 0:
-        return r_enall
-    else:
-        return None
+
+    return enall
 #=======================================================================
-def get_order(arr,nmax, grid, comm):
+def get_order(arr,nmax, grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -208,7 +197,6 @@ def get_order(arr,nmax, grid, comm):
 	  max(eigenvalues(Qab)) (float) = order parameter for lattice.
     """
 
-    rank = comm.Get_rank()
 
     #print(f'Process: get_order, Core number is: {rank}, lattice loc is: {grid[0]}')
 
@@ -224,18 +212,13 @@ def get_order(arr,nmax, grid, comm):
         for b in range(3):
             for i, j in grid:
                     Qab[a,b] += 3*lab[a,i,j]*lab[b,i,j] - delta[a,b]
-    comm.Barrier()
-    Qab = comm.reduce(Qab, op=MPI.SUM, root = 0)
 
-    if rank == 0:
-        Qab = Qab/(2*nmax*nmax)
-    
-        eigenvalues,eigenvectors = np.linalg.eig(Qab)
-        return eigenvalues.max()
-    else:
-        return None
+    Qab = Qab/(2*nmax*nmax)
+    eigenvalues,eigenvectors = np.linalg.eig(Qab)
+
+    return eigenvalues.max()
 #=======================================================================
-def MC_step(arr,Ts,nmax, grid, comm):
+def MC_step(arr,Ts,nmax, grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -259,8 +242,6 @@ def MC_step(arr,Ts,nmax, grid, comm):
     scale=0.1+Ts
     accept = 0
 
-    rank = comm.Get_rank()
-    size = comm.Get_size()
     #randomness has to be removed to allow it to be multi cored
     #otherwise two cores could work on the same node
     #its also very difficult to combine
@@ -287,12 +268,8 @@ def MC_step(arr,Ts,nmax, grid, comm):
                 arr[i,j] -= ang
 
     #gather all of the local accepts into one
-    comm.Barrier()
-    total_accept = comm.reduce(accept, op=MPI.SUM, root = 0)
-    if rank == 0:
-      return total_accept/(nmax*nmax)
-    else:
-        return None
+    return accept/(nmax*nmax)
+
 #=======================================================================
 def main(program, nsteps, nmax, temp, pflag):
     """
@@ -334,17 +311,17 @@ def main(program, nsteps, nmax, temp, pflag):
     ratio = np.zeros(nsteps+1)
     order = np.zeros(nsteps+1)
     # Set initial values in arrays
-    energy[0] = all_energy(lattice,nmax, local_grid, comm)
+    energy[0] = all_energy(lattice,nmax, local_grid)
     ratio[0] = 0.5 # ideal value
-    order[0] = get_order(lattice,nmax, local_grid, comm)
+    order[0] = get_order(lattice,nmax, local_grid)
 
     # Begin doing and timing some MC steps.
     if rank == 0:
         initial = time.time()
     for it in range(1,nsteps+1):
-        ratio[it] = MC_step(lattice,temp,nmax, local_grid, comm)
-        energy[it] = all_energy(lattice, nmax, local_grid, comm)
-        order[it] = get_order(lattice, nmax, local_grid, comm)
+        ratio[it] = MC_step(lattice,temp,nmax, local_grid)
+        energy[it] = all_energy(lattice, nmax, local_grid)
+        order[it] = get_order(lattice, nmax, local_grid)
         #gather all of the local arrs into one
         #done by splitting the array by the section they have worked on
         comm.Barrier()
@@ -352,6 +329,11 @@ def main(program, nsteps, nmax, temp, pflag):
         gathered_arr = comm.gather(split_arr[rank], root=0)
         if rank == 0:
             lattice = np.concatenate(gathered_arr).reshape(nmax, nmax)
+
+    comm.Barrier()
+    energy = comm.reduce(energy, op=MPI.SUM, root=0)
+    order = comm.reduce(order, op=MPI.SUM, root=0)
+    ratio = comm.reduce(ratio, op=MPI.SUM, root=0)
 
     if rank == 0:
         final = time.time()

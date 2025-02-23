@@ -163,7 +163,7 @@ def one_energy(arr,ix,iy,nmax):
     en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
     return en
 #=======================================================================
-def all_energy(arr,nmax, grid, comm):
+def all_energy(arr,nmax, grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -174,7 +174,6 @@ def all_energy(arr,nmax, grid, comm):
 	Returns:
 	  enall (float) = reduced energy of lattice.
     """
-    rank = comm.Get_rank()
 
 
     #print(f'Process: all_energy, Core number is: {rank}, lattice loc is: {grid[0]}')
@@ -182,20 +181,11 @@ def all_energy(arr,nmax, grid, comm):
     enall = 0.0
     for i, j in grid:
         enall += one_energy(arr,i,j,nmax)
-    
-    comm.Barrier()
-    r_enall = comm.reduce(enall, op=MPI.SUM, root=0)
-    '''
-    for i in range(nmax):
-        for j in range(nmax):
-            enall += one_energy(arr,i,j,nmax)
-    '''
-    if rank == 0:
-        return r_enall
-    else:
-        return None
+
+    return enall
+
 #=======================================================================
-def get_order(arr,nmax, grid, comm):
+def get_order(arr,nmax, grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -208,7 +198,6 @@ def get_order(arr,nmax, grid, comm):
 	  max(eigenvalues(Qab)) (float) = order parameter for lattice.
     """
 
-    rank = comm.Get_rank()
 
     #print(f'Process: get_order, Core number is: {rank}, lattice loc is: {grid[0]}')
 
@@ -224,16 +213,11 @@ def get_order(arr,nmax, grid, comm):
         for b in range(3):
             for i, j in grid:
                     Qab[a,b] += 3*lab[a,i,j]*lab[b,i,j] - delta[a,b]
-    comm.Barrier()
-    Qab = comm.reduce(Qab, op=MPI.SUM, root = 0)
 
-    if rank == 0:
-        Qab = Qab/(2*nmax*nmax)
-    
-        eigenvalues,eigenvectors = np.linalg.eig(Qab)
-        return eigenvalues.max()
-    else:
-        return None
+    Qab = Qab/(2*nmax*nmax)
+    eigenvalues,eigenvectors = np.linalg.eig(Qab)
+
+    return eigenvalues.max()
 #=======================================================================
 def MC_step(arr,Ts,nmax):
     """
@@ -300,9 +284,6 @@ def main(program, nsteps, nmax, temp, pflag):
     size = comm.Get_size()
     rank = comm.Get_rank()
     
-    if rank == 0:
-        initial = MPI.Wtime()
-    
     #creates xy grid, 2 x nmax squared array for iterating through all x and y values
     grid = np.mgrid[0:nmax,0:nmax].reshape(2,-1).T
 
@@ -312,31 +293,19 @@ def main(program, nsteps, nmax, temp, pflag):
     #scatters local grid to each of the cores
     local_grid = comm.scatter(split_grid, root=0)
 
-    #creates chunks, start, and end variables
-    '''
-    chunk_size = nmax*nmax//size
-    start = rank*chunk_size
-    end = (rank+1) * chunk_size if rank != size-1 else nmax*nmax
-    print(start, end)
-    '''
-
     # Create and initialise lattice
     lattice = initdat(nmax)
     # Plot initial frame of lattice
-    plotdat(lattice,pflag,nmax)
+    if rank == 0:
+      plotdat(lattice,pflag,nmax)
     # Create arrays to store energy, acceptance ratio and order parameter
-    '''
-    energy = np.zeros(nsteps+1,dtype=np.dtype)
-    ratio = np.zeros(nsteps+1,dtype=np.dtype)
-    order = np.zeros(nsteps+1,dtype=np.dtype)
-    '''
     energy = np.zeros(nsteps+1)
     ratio = np.zeros(nsteps+1)
     order = np.zeros(nsteps+1)
     # Set initial values in arrays
-    energy[0] = all_energy(lattice,nmax, local_grid, comm)
+    energy[0] = all_energy(lattice,nmax, local_grid)
     ratio[0] = 0.5 # ideal value
-    order[0] = get_order(lattice,nmax, local_grid, comm)
+    order[0] = get_order(lattice,nmax, local_grid)
 
     # Begin doing and timing some MC steps.
     if rank == 0:
@@ -344,13 +313,16 @@ def main(program, nsteps, nmax, temp, pflag):
     for it in range(1,nsteps+1):
         if rank == 0:
             ratio[it] = MC_step(lattice,temp,nmax)
-        energy[it] = all_energy(lattice, nmax, local_grid, comm)
-        order[it] = get_order(lattice, nmax, local_grid, comm)
+        energy[it] = all_energy(lattice, nmax, local_grid)
+        order[it] = get_order(lattice, nmax, local_grid)
+
+    comm.Barrier()
+    energy = comm.reduce(energy, op=MPI.SUM, root=0)
+    order = comm.reduce(order, op=MPI.SUM, root=0)
+
     if rank == 0:
         final = time.time()
         runtime = final-initial
-        energy = comm.bcast(energy, root = 0)
-        #order = comm.bcast
 
         # Final outputs
         print("{}: Size: {:d}, Steps: {:d}, T*: {:5.3f}: Order: {:5.3f}, Time: {:8.6f} s".format(program, nmax,nsteps,temp,order[nsteps-1],runtime))

@@ -129,7 +129,7 @@ def savedat(arr,nsteps,Ts,runtime,ratio,energy,order,nmax):
         print("   {:05d}    {:6.4f} {:12.4f}  {:6.4f} ".format(i,ratio[i],energy[i],order[i]),file=FileOut)
     FileOut.close()
 #=======================================================================
-@numba.jit()
+@numba.jit(nopython = True)
 def one_energy(arr,ix,iy,nmax):
     """
     Arguments:
@@ -164,7 +164,7 @@ def one_energy(arr,ix,iy,nmax):
     en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
     return en
 #=======================================================================
-numba.jit()
+numba.jit(nopython = True)
 def all_energy(arr,nmax):
     """
     Arguments:
@@ -235,12 +235,13 @@ def MC_step(arr,Ts,nmax):
     xran = np.random.randint(0,high=nmax, size=(nmax,nmax))
     yran = np.random.randint(0,high=nmax, size=(nmax,nmax))
     aran = np.random.normal(scale=scale, size=(nmax,nmax))
+    oran = np.random.uniform(0.0,1.0, size=(nmax,nmax))
 
-    accept = MC_step_loop(arr, nmax, Ts, xran, yran, aran)
+    accept = MC_step_loop(arr, nmax, Ts, xran, yran, aran, oran)
     return accept/(nmax*nmax)
 #=======================================================================
-@numba.jit()
-def MC_step_loop(arr, nmax, Ts, xran, yran, aran):
+@numba.jit(nopython = True)
+def MC_step_loop(arr, nmax, Ts, xran, yran, aran, oran):
     accept = 0
     for i in range(nmax):
         for j in range(nmax):
@@ -257,7 +258,7 @@ def MC_step_loop(arr, nmax, Ts, xran, yran, aran):
             # exp( -(E_new - E_old) / T* ) >= rand(0,1)
                 boltz = np.exp( -(en1 - en0) / Ts )
 
-                if boltz >= np.random.uniform(0.0,1.0):
+                if boltz >= oran[i,j]:
                     accept += 1
                 else:
                     arr[ix,iy] -= ang

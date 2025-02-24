@@ -8,7 +8,8 @@ from cython.parallel import prange
 import time
 import numpy as np
 import pandas as pd
-from mpi4py import MPI
+
+cdef int cores = 4
 
 def initdat(nmax):
     """
@@ -23,6 +24,7 @@ def initdat(nmax):
     """
     arr = np.random.random_sample((nmax,nmax))*2.0*np.pi
     return arr
+#=======================================================================
 
 @cython.boundscheck(False) 
 cdef double one_energy(double[:,:] arr, int ix ,int iy, int nmax) noexcept nogil:
@@ -60,7 +62,7 @@ cdef double one_energy(double[:,:] arr, int ix ,int iy, int nmax) noexcept nogil
     return en
 #=======================================================================
 @cython.boundscheck(False) 
-cdef float all_energy(double[:,:] arr, int nmax, int[:,:] grid, int grid_len):
+cdef float all_energy(double[:,:] arr, int nmax, int[:,:] grid) noexcept nogil:
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -74,15 +76,14 @@ cdef float all_energy(double[:,:] arr, int nmax, int[:,:] grid, int grid_len):
     cdef float enall = 0.0
     cdef int i, j, k
 
-    for k in range(grid_len):
+    for k in prange(nmax*nmax, num_threads=cores):
         i = grid[k][0]
         j = grid[k][1]
         enall += one_energy(arr,i,j,nmax)
-
     return enall
 #=======================================================================
 @cython.boundscheck(False) 
-def get_order(double[:,:] arr, int nmax, int[:,:] grid, int grid_len):
+def get_order(double[:,:] arr, int nmax, int[:,:] grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -94,8 +95,6 @@ def get_order(double[:,:] arr, int nmax, int[:,:] grid, int grid_len):
 	Returns:
 	  max(eigenvalues(Qab)) (float) = order parameter for lattice.
     """
-    #assign rank
-
     grid3 = np.array(np.mgrid[0:3,0:3].reshape(2,-1).T, dtype=np.int32)
     cdef int[:,:] grid3_view = grid3
 
@@ -112,22 +111,19 @@ def get_order(double[:,:] arr, int nmax, int[:,:] grid, int grid_len):
     cdef double[:,:,:] lab_view = lab
     cdef int a, b, c, i, j, k
 
-    with nogil:
-        for c in range(9):
-            a = grid3_view[c][0]
-            b = grid3_view[c][1]
-            for k in range(grid_len):
-                i = grid[k][0]
-                j = grid[k][1]
-                Qab_view[a,b] += 3*lab_view[a,i,j]*lab_view[b,i,j] - delta_view[a,b]
-    
+    for c in prange(9, nogil=True, num_threads=cores):
+        a = grid3_view[c][0]
+        b = grid3_view[c][1]
+        for k in range(nmax*nmax):
+            i = grid[k][0]
+            j = grid[k][1]
+            Qab_view[a,b] += 3*lab_view[a,i,j]*lab_view[b,i,j] - delta_view[a,b]
     Qab = Qab/(2*nmax*nmax)
     eigenvalues,eigenvectors = np.linalg.eig(Qab)
-
     return eigenvalues.max()
 #=======================================================================
 @cython.boundscheck(False)
-def MC_step(double[:,:] arr,float Ts, int nmax, int[:,:] grid, int grid_len):
+def MC_step(double[:,:] arr,float Ts, int nmax, int[:,:] grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -149,50 +145,46 @@ def MC_step(double[:,:] arr,float Ts, int nmax, int[:,:] grid, int grid_len):
     # of the distribution for the angle changes - increases
     # with temperature.
 
-    #randomness has to be removed to allow it to be multi cored
-    #otherwise two cores could work on the same node
-    #its also very difficult to combine
     cdef float scale=0.1+Ts
     
-    #creates random array the same length as the section of lattice the core is working on
-    aran = np.random.normal(scale=scale, size=grid_len)
+    xran = np.random.randint(0,high=nmax, size=(nmax*nmax), dtype = np.int32)
+    yran = np.random.randint(0,high=nmax, size=(nmax*nmax), dtype = np.int32)
+    aran = np.random.normal(scale=scale, size=(nmax*nmax))
+    cdef int[::1] xran_view = xran
+    cdef int[::1] yran_view = yran
     cdef double[::1] aran_view = aran
 
-    #same for the uniform random number array
-    uniran = np.random.uniform(0.0, 1.0, size = grid_len)
+    uniran = np.random.uniform(0.0, 1.0, size = nmax*nmax)
     cdef double[::1] uniran_view = uniran
 
-    cdef int ix = 0, iy = 0, f
+    cdef int ix = 0, iy = 0, f, i, j
     cdef double ang, en0, en1, boltz
     cdef float accept = 0.0
 
-    with nogil:
-        for f in range(grid_len):
+    for f in prange(nmax*nmax, nogil=True, num_threads=cores):
+        accept += 0.0
+        ix = xran_view[f]
+        iy = yran_view[f]
+        ang = aran_view[f]
+        en0 = one_energy(arr,ix,iy,nmax)
+        arr[ix,iy] += ang
+        en1 = one_energy(arr,ix,iy,nmax)
+        if en1<=en0:
+            accept += 1.0
+        else:
             accept += 0.0
-            ix = grid[f][0]
-            iy = grid[f][1]
-            ang = aran_view[f]
-            en0 = one_energy(arr,ix,iy,nmax)
-            arr[ix,iy] += ang
-            en1 = one_energy(arr,ix,iy,nmax)
-            if en1<=en0:
+        # Now apply the Monte Carlo test - compare
+        # exp( -(E_new - E_old) / T* ) >= rand(0,1)
+            boltz = cexp( -(en1 - en0) / Ts )
+
+            if boltz >= uniran_view[f]:
                 accept += 1.0
             else:
+                arr[ix,iy] -= ang
                 accept += 0.0
-            # Now apply the Monte Carlo test - compare
-            # exp( -(E_new - E_old) / T* ) >= rand(0,1)
-                boltz = cexp( -(en1 - en0) / Ts )
-
-                if boltz >= uniran_view[f]:
-                    accept += 1.0
-                else:
-                    arr[ix,iy] -= ang
-                    accept += 0.0
-
-    #gather all of the local accepts into one
     return accept/(nmax*nmax)
 #=======================================================================
-def main(int nsteps, int nmax, float temp, comm):
+def main(int nsteps, int nmax, float temp):
     """
     Arguments:
 	  program (string) = the name of the program;
@@ -205,25 +197,14 @@ def main(int nsteps, int nmax, float temp, comm):
     Returns:
       NULL
     """
-    #initialise MPI
-    cdef int size = comm.Get_size()
-    cdef int rank = comm.Get_rank()
-
     #creates xy grid, 2 x nmax squared array for iterating through all x and y values
     grid = np.array(np.mgrid[0:nmax,0:nmax].reshape(2,-1).T, dtype=np.int32)
-
-    #splits the grid by the number of cores
-    split_grid = np.array_split(grid, size)
-
-    #scatters local grid to each of the cores
-    local_grid = comm.scatter(split_grid, root=0)
-    cdef int grid_len = len(local_grid)
-    cdef int[:,:] local_grid_view = local_grid
+    cdef int[:,:] grid_view = grid
 
     # Create and initialise lattice
     lattice = initdat(nmax)
     cdef double[:,:] lattice_view = lattice
-
+    # Plot initial frame of lattice
     # Create arrays to store energy, acceptance ratio and order parameter
     '''
     energy = np.zeros(nsteps+1,dtype=np.dtype)
@@ -237,43 +218,22 @@ def main(int nsteps, int nmax, float temp, comm):
     cdef double[::1] ratio_view = ratio
     cdef double[::1] order_view = order
     # Set initial values in arrays
-    energy_view[0] = all_energy(lattice_view,nmax, local_grid_view, grid_len)
+    energy_view[0] = all_energy(lattice_view,nmax, grid_view)
     ratio_view[0] = 0.5 # ideal value
-    order_view[0] = get_order(lattice_view,nmax, local_grid_view, grid_len)
+    order_view[0] = get_order(lattice_view,nmax, grid_view)
 
     # Begin doing and timing some MC steps.
-    if rank == 0:
-        initial = time.time()
+    cdef double initial = time.time()
     for it in range(1,nsteps+1):
-        ratio_view[it] = MC_step(lattice_view,temp,nmax, local_grid_view, grid_len)
-        energy_view[it] = all_energy(lattice_view,nmax, local_grid_view, grid_len)
-        order_view[it] = get_order(lattice_view,nmax, local_grid_view, grid_len)
-        #gather all of the local arrs into one
-        #done by splitting the array by the section they have worked on
-        comm.Barrier()
-        split_arr = np.array_split(lattice.reshape(nmax*nmax), size)
-        gathered_arr = comm.gather(split_arr[rank], root=0)
-        if rank == 0:
-            lattice = np.concatenate(gathered_arr).reshape(nmax, nmax)
-        lattice = comm.bcast(lattice, root = 0)
-        lattice_view = lattice
+        ratio_view[it] = MC_step(lattice_view,temp,nmax, grid_view)
+        energy_view[it] = all_energy(lattice_view,nmax, grid_view)
+        order_view[it] = get_order(lattice_view,nmax, grid_view)
+    cdef double final = time.time()
+    cdef double runtime = final-initial
 
-    comm.Barrier()
-    energy = comm.reduce(energy, op=MPI.SUM, root=0)
-    order = comm.reduce(order, op=MPI.SUM, root=0)
-    ratio = comm.reduce(ratio, op=MPI.SUM, root=0)
-
-    if rank == 0:
-        final = time.time()
-
-        runtime = final-initial
-
-        return runtime
+    return runtime
 
 def timing():
-    comm = MPI.COMM_WORLD
-    size = comm.Get_size()
-    rank = comm.Get_rank()
 
     lat_size = np.arange(10, 101, 10)
     iter_size = np.arange(100, 1001, 100)
@@ -281,12 +241,11 @@ def timing():
     lat_time = np.zeros(10)
     iter_time = np.zeros(10)
     for i in range(10):
-        lat_time[i] = main(200, lat_size[i], 0.5, comm)
-        iter_time[i] = main(iter_size[i], 50, 0.5, comm)
+        lat_time[i] = main(200, lat_size[i], 0.5)
+        iter_time[i] = main(iter_size[i], 50, 0.5)
 
-    if rank == 0:
-        lat_dataframe = pd.DataFrame(index = lat_size, columns = [f'Cython MPI: {size} core'], data = lat_time)
-        iter_dataframe = pd.DataFrame(index = iter_size, columns = [f'Cython MPI: {size} core'], data = iter_time)
+    lat_dataframe = pd.DataFrame(index = lat_size, columns = [f'Cython: {cores} core'], data = lat_time)
+    iter_dataframe = pd.DataFrame(index = iter_size, columns = [f'Cython: {cores} core'], data = iter_time)
 
-        lat_dataframe.to_csv(f'./times/lat_cython_mpi_{size}_core.csv')
-        iter_dataframe.to_csv(f'./times/iter_cython_mpi_{size}_core.csv')
+    lat_dataframe.to_csv(f'./times/lat_cython_{cores}_core.csv')
+    iter_dataframe.to_csv(f'./times/iter_cython_{cores}_core.csv')

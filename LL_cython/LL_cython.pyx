@@ -21,6 +21,15 @@ domains alternate between old data and new data.
 
 SH 16-Oct-23
 """
+#cython: language_level=3
+
+import numpy as np
+import cython
+from libc.math cimport cos as ccos
+from libc.math cimport pow as cpow
+from libc.math cimport exp as cexp
+cimport numpy as cnp
+from cython.parallel import prange
 
 import sys
 import time
@@ -128,7 +137,8 @@ def savedat(arr,nsteps,Ts,runtime,ratio,energy,order,nmax):
         print("   {:05d}    {:6.4f} {:12.4f}  {:6.4f} ".format(i,ratio[i],energy[i],order[i]),file=FileOut)
     FileOut.close()
 #=======================================================================
-def one_energy(arr,ix,iy,nmax):
+@cython.boundscheck(False) 
+cdef double one_energy(double[:,:] arr, int ix ,int iy, int nmax) noexcept nogil:
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -143,26 +153,27 @@ def one_energy(arr,ix,iy,nmax):
 	Returns:
 	  en (float) = reduced energy of cell.
     """
-    en = 0.0
-    ixp = (ix+1)%nmax # These are the coordinates
-    ixm = (ix-1)%nmax # of the neighbours
-    iyp = (iy+1)%nmax # with wraparound
-    iym = (iy-1)%nmax #
-#
-# Add together the 4 neighbour contributions
-# to the energy
-#
+    cdef float en = 0.0
+    cdef int ixp = (ix+1)%nmax # These are the coordinates
+    cdef int ixm = (ix-1)%nmax # of the neighbours
+    cdef int iyp = (iy+1)%nmax # with wraparound
+    cdef int iym = (iy-1)%nmax #
+    #
+    # Add together the 4 neighbour contributions
+    # to the energy
+    #
     ang = arr[ix,iy]-arr[ixp,iy]
-    en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
+    en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     ang = arr[ix,iy]-arr[ixm,iy]
-    en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
+    en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     ang = arr[ix,iy]-arr[ix,iyp]
-    en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
+    en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     ang = arr[ix,iy]-arr[ix,iym]
-    en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
+    en += 0.5*(1.0 - 3.0*cpow(ccos(ang),2))
     return en
 #=======================================================================
-def all_energy(arr,nmax, grid):
+@cython.boundscheck(False) 
+cdef float all_energy(double[:,:] arr, int nmax, int[:,:] grid) noexcept nogil:
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -173,10 +184,17 @@ def all_energy(arr,nmax, grid):
 	Returns:
 	  enall (float) = reduced energy of lattice.
     """
-    enall = np.sum(one_energy(arr, grid[:,0], grid[:,1], nmax))
+    cdef float enall = 0.0
+    cdef int i, j, k
+
+    for k in prange(nmax*nmax, num_threads=1):
+        i = grid[k][0]
+        j = grid[k][1]
+        enall += one_energy(arr,i,j,nmax)
     return enall
 #=======================================================================
-def get_order(arr,nmax):
+@cython.boundscheck(False) 
+def get_order(double[:,:] arr, int nmax, int[:,:] grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -188,27 +206,40 @@ def get_order(arr,nmax):
 	Returns:
 	  max(eigenvalues(Qab)) (float) = order parameter for lattice.
     """
-    Qab = np.zeros((3,3))
-    delta = np.eye(3,3)
+    grid3 = np.array(np.mgrid[0:3,0:3].reshape(2,-1).T, dtype=np.int32)
+    cdef int[:,:] grid3_view = grid3
+
+    Qab = np.zeros((3,3), dtype=np.double)
+    delta = np.eye(3,3, dtype=np.double)
+    cdef double[:,:] Qab_view = Qab
+    cdef double[:,:] delta_view = delta
+
     #
     # Generate a 3D unit vector for each cell (i,j) and
     # put it in a (3,i,j) array.
     #
-    lab = np.vstack((np.cos(arr),np.sin(arr),np.zeros_like(arr))).reshape(3,nmax,nmax)
-    for a in range(3):
-        for b in range(3):
-            Qab[a,b] = np.sum(3*lab[a,:,:]*lab[b,:,:] - delta[a,b])
+    lab = np.vstack((np.cos(arr),np.sin(arr),np.zeros_like(arr)), dtype = np.double).reshape(3,nmax,nmax)
+    cdef double[:,:,:] lab_view = lab
+    cdef int a, b, c, i, j, k
+
+    for c in prange(9, nogil=True, num_threads=1):
+        a = grid3_view[c][0]
+        b = grid3_view[c][1]
+        for k in range(nmax*nmax):
+            i = grid[k][0]
+            j = grid[k][1]
+            Qab_view[a,b] += 3*lab_view[a,i,j]*lab_view[b,i,j] - delta_view[a,b]
     Qab = Qab/(2*nmax*nmax)
     eigenvalues,eigenvectors = np.linalg.eig(Qab)
     return eigenvalues.max()
 #=======================================================================
-def MC_step(arr,Ts,nmax, grid):
+@cython.boundscheck(False)
+def MC_step(double[:,:] arr,float Ts, int nmax, int[:,:] grid):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
 	  Ts (float) = reduced temperature (range 0 to 2);
-    nmax (int) = side length of square lattice.
-    grid (array) = array containing all indexes of the lattice
+      nmax (int) = side length of square lattice.
     Description:
       Function to perform one MC step, which consists of an average
       of 1 attempted change per lattice site.  Working with reduced
@@ -224,52 +255,47 @@ def MC_step(arr,Ts,nmax, grid):
     # using lots of individual calls.  "scale" sets the width
     # of the distribution for the angle changes - increases
     # with temperature.
-    scale=0.1+Ts
-    accept = 0
-    aran = np.random.normal(scale=scale, size=(nmax,nmax))
 
-
-    #to work with numpy array vectoring all angles cannot be changed at once,
-    #as energy depends on the adjacent crystals.
-    #instead it is changed in a checkerboard pattern, so no adjacent crystal
-    #is ever changed at the same time.
+    cdef float scale=0.1+Ts
     
-    #creates a checkerboard of 1s and 0s
-    checkerboard = np.indices([nmax, nmax]).sum(axis=0) % 2
+    xran = np.random.randint(0,high=nmax, size=(nmax*nmax), dtype = np.int32)
+    yran = np.random.randint(0,high=nmax, size=(nmax*nmax), dtype = np.int32)
+    aran = np.random.normal(scale=scale, size=(nmax*nmax))
+    cdef int[::1] xran_view = xran
+    cdef int[::1] yran_view = yran
+    cdef double[::1] aran_view = aran
 
-    for i in range(2):
-        
-        arr_copy = arr.copy()
+    uniran = np.random.uniform(0.0, 1.0, size = nmax*nmax)
+    cdef double[::1] uniran_view = uniran
 
-        en0 = one_energy(arr, grid[:,0], grid[:,1], nmax)
-        #only adds the random angle to half the lattice
-        arr[checkerboard == i] += aran[checkerboard == i]
-        en1 = one_energy(arr, grid[:,0], grid[:,1], nmax)
-       
+    cdef int ix = 0, iy = 0, f, i, j
+    cdef double ang, en0, en1, boltz
+    cdef float accept = 0.0
 
-        #creates new energies for the checkerboard
-        en0_checker = en0.reshape(nmax, nmax)[checkerboard == i]
-        en1_checker = en1.reshape(nmax, nmax)[checkerboard == i]
-        #adds one for each energy below the previous energy
-        accept += np.sum(en1_checker <= en0_checker)
-        
-        #calculates boltz and compares it to a random number
-        boltz = np.exp(-(en1_checker[en1_checker>en0_checker] - en0_checker[en1_checker>en0_checker]) / Ts)
-        boltz_rand = np.random.uniform(0, 1.0, size=np.shape(boltz))
-        accept += np.sum(boltz >= boltz_rand)
+    for f in prange(nmax*nmax, nogil=True, num_threads=1):
+        accept += 0.0
+        ix = xran_view[f]
+        iy = yran_view[f]
+        ang = aran_view[f]
+        en0 = one_energy(arr,ix,iy,nmax)
+        arr[ix,iy] += ang
+        en1 = one_energy(arr,ix,iy,nmax)
+        if en1<=en0:
+            accept += 1.0
+        else:
+            accept += 0.0
+        # Now apply the Monte Carlo test - compare
+        # exp( -(E_new - E_old) / T* ) >= rand(0,1)
+            boltz = cexp( -(en1 - en0) / Ts )
 
-        #creates the index for values that need to be changed back, goes back three array changes
-        index = np.where(checkerboard.reshape(nmax*nmax) == i)[0][np.where(en1_checker>en0_checker)[0][np.where(boltz<boltz_rand)[0]]]
-    
-        #changes values back, and changes all values that arent part of the half checkerboard
-        arr.reshape(nmax**2)[index] -= aran.reshape(nmax**2)[index]
-
-        #this step wasnt needed, so was removed
-        #arr[checkerboard == (i+1)%2] = arr_copy[checkerboard == (i+1)%2]
-
+            if boltz >= uniran_view[f]:
+                accept += 1.0
+            else:
+                arr[ix,iy] -= ang
+                accept += 0.0
     return accept/(nmax*nmax)
 #=======================================================================
-def main(program, nsteps, nmax, temp, pflag):
+def main(str program, int nsteps, int nmax, float temp, int pflag):
     """
     Arguments:
 	  program (string) = the name of the program;
@@ -282,8 +308,13 @@ def main(program, nsteps, nmax, temp, pflag):
     Returns:
       NULL
     """
+    #creates xy grid, 2 x nmax squared array for iterating through all x and y values
+    grid = np.array(np.mgrid[0:nmax,0:nmax].reshape(2,-1).T, dtype=np.int32)
+    cdef int[:,:] grid_view = grid
+
     # Create and initialise lattice
     lattice = initdat(nmax)
+    cdef double[:,:] lattice_view = lattice
     # Plot initial frame of lattice
     plotdat(lattice,pflag,nmax)
     # Create arrays to store energy, acceptance ratio and order parameter
@@ -292,34 +323,31 @@ def main(program, nsteps, nmax, temp, pflag):
     ratio = np.zeros(nsteps+1,dtype=np.dtype)
     order = np.zeros(nsteps+1,dtype=np.dtype)
     '''
-    #create a grid of all possible lattice indexes
-    grid = np.mgrid[0:nmax,0:nmax].reshape(2,-1).T
-
-    energy = np.zeros(nsteps+1)
-    ratio = np.zeros(nsteps+1)
-    order = np.zeros(nsteps+1)
+    energy = np.zeros(nsteps+1, dtype=np.double)
+    ratio = np.zeros(nsteps+1, dtype=np.double)
+    order = np.zeros(nsteps+1, dtype=np.double)
+    cdef double[::1] energy_view = energy
+    cdef double[::1] ratio_view = ratio
+    cdef double[::1] order_view = order
     # Set initial values in arrays
-    energy[0] = all_energy(lattice,nmax, grid)
-    ratio[0] = 0.5 # ideal value
-    order[0] = get_order(lattice,nmax)
+    energy_view[0] = all_energy(lattice_view,nmax, grid_view)
+    ratio_view[0] = 0.5 # ideal value
+    order_view[0] = get_order(lattice_view,nmax, grid_view)
 
     # Begin doing and timing some MC steps.
-    initial = time.time()
+    cdef double initial = time.time()
     for it in range(1,nsteps+1):
-        ratio[it] = MC_step(lattice,temp,nmax, grid)
-        energy[it] = all_energy(lattice,nmax,grid)
-        order[it] = get_order(lattice,nmax)
-    final = time.time()
-    runtime = final-initial
+        ratio_view[it] = MC_step(lattice_view,temp,nmax, grid_view)
+        energy_view[it] = all_energy(lattice_view,nmax, grid_view)
+        order_view[it] = get_order(lattice_view,nmax, grid_view)
+    cdef double final = time.time()
+    cdef double runtime = final-initial
     
     # Final outputs
     print("{}: Size: {:d}, Steps: {:d}, T*: {:5.3f}: Order: {:5.3f}, Time: {:8.6f} s".format(program, nmax,nsteps,temp,order[nsteps-1],runtime))
     # Plot final frame of lattice and generate output file
     savedat(lattice,nsteps,temp,runtime,ratio,energy,order,nmax)
     plotdat(lattice,pflag,nmax)
-    #fig, ax = plt.subplots()
-    #ax.plot(np.arange(nsteps+1), order)
-    #plt.show(block=True)
 #=======================================================================
 # Main part of program, getting command line arguments and calling
 # main simulation function.

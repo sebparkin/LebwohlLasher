@@ -28,6 +28,8 @@ import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import numba
+from numba import prange
 
 #=======================================================================
 def initdat(nmax):
@@ -128,6 +130,7 @@ def savedat(arr,nsteps,Ts,runtime,ratio,energy,order,nmax):
         print("   {:05d}    {:6.4f} {:12.4f}  {:6.4f} ".format(i,ratio[i],energy[i],order[i]),file=FileOut)
     FileOut.close()
 #=======================================================================
+@numba.jit(nopython = True)
 def one_energy(arr,ix,iy,nmax):
     """
     Arguments:
@@ -162,7 +165,8 @@ def one_energy(arr,ix,iy,nmax):
     en += 0.5*(1.0 - 3.0*np.cos(ang)**2)
     return en
 #=======================================================================
-def all_energy(arr,nmax, grid):
+numba.jit(nopython = True, parallel = True)
+def all_energy(arr,nmax):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
@@ -173,7 +177,10 @@ def all_energy(arr,nmax, grid):
 	Returns:
 	  enall (float) = reduced energy of lattice.
     """
-    enall = np.sum(one_energy(arr, grid[:,0], grid[:,1], nmax))
+    enall = 0.0
+    for i in prange(nmax):
+        for j in range(nmax):
+            enall += one_energy(arr,i,j,nmax)
     return enall
 #=======================================================================
 def get_order(arr,nmax):
@@ -195,20 +202,28 @@ def get_order(arr,nmax):
     # put it in a (3,i,j) array.
     #
     lab = np.vstack((np.cos(arr),np.sin(arr),np.zeros_like(arr))).reshape(3,nmax,nmax)
-    for a in range(3):
-        for b in range(3):
-            Qab[a,b] = np.sum(3*lab[a,:,:]*lab[b,:,:] - delta[a,b])
-    Qab = Qab/(2*nmax*nmax)
+
+    total = Qab_func(Qab, lab, delta, nmax)
+    Qab = total
     eigenvalues,eigenvectors = np.linalg.eig(Qab)
     return eigenvalues.max()
+
+numba.jit(nopython = True, parallel = True)
+def Qab_func(Qab, lab, delta, nmax):
+    for a in prange(3):
+        for b in range(3):
+            for i in range(nmax):
+                for j in range(nmax):
+                    Qab[a,b] += np.sum(3*lab[a,i,j]*lab[b,i,j] - delta[a,b])
+    Qab = Qab/(2*nmax*nmax)
+    return Qab
 #=======================================================================
-def MC_step(arr,Ts,nmax, grid):
+def MC_step(arr,Ts,nmax):
     """
     Arguments:
 	  arr (float(nmax,nmax)) = array that contains lattice data;
 	  Ts (float) = reduced temperature (range 0 to 2);
-    nmax (int) = side length of square lattice.
-    grid (array) = array containing all indexes of the lattice
+      nmax (int) = side length of square lattice.
     Description:
       Function to perform one MC step, which consists of an average
       of 1 attempted change per lattice site.  Working with reduced
@@ -225,49 +240,36 @@ def MC_step(arr,Ts,nmax, grid):
     # of the distribution for the angle changes - increases
     # with temperature.
     scale=0.1+Ts
-    accept = 0
+    xran = np.random.randint(0,high=nmax, size=(nmax,nmax))
+    yran = np.random.randint(0,high=nmax, size=(nmax,nmax))
     aran = np.random.normal(scale=scale, size=(nmax,nmax))
 
-
-    #to work with numpy array vectoring all angles cannot be changed at once,
-    #as energy depends on the adjacent crystals.
-    #instead it is changed in a checkerboard pattern, so no adjacent crystal
-    #is ever changed at the same time.
-    
-    #creates a checkerboard of 1s and 0s
-    checkerboard = np.indices([nmax, nmax]).sum(axis=0) % 2
-
-    for i in range(2):
-        
-        arr_copy = arr.copy()
-
-        en0 = one_energy(arr, grid[:,0], grid[:,1], nmax)
-        #only adds the random angle to half the lattice
-        arr[checkerboard == i] += aran[checkerboard == i]
-        en1 = one_energy(arr, grid[:,0], grid[:,1], nmax)
-       
-
-        #creates new energies for the checkerboard
-        en0_checker = en0.reshape(nmax, nmax)[checkerboard == i]
-        en1_checker = en1.reshape(nmax, nmax)[checkerboard == i]
-        #adds one for each energy below the previous energy
-        accept += np.sum(en1_checker <= en0_checker)
-        
-        #calculates boltz and compares it to a random number
-        boltz = np.exp(-(en1_checker[en1_checker>en0_checker] - en0_checker[en1_checker>en0_checker]) / Ts)
-        boltz_rand = np.random.uniform(0, 1.0, size=np.shape(boltz))
-        accept += np.sum(boltz >= boltz_rand)
-
-        #creates the index for values that need to be changed back, goes back three array changes
-        index = np.where(checkerboard.reshape(nmax*nmax) == i)[0][np.where(en1_checker>en0_checker)[0][np.where(boltz<boltz_rand)[0]]]
-    
-        #changes values back, and changes all values that arent part of the half checkerboard
-        arr.reshape(nmax**2)[index] -= aran.reshape(nmax**2)[index]
-
-        #this step wasnt needed, so was removed
-        #arr[checkerboard == (i+1)%2] = arr_copy[checkerboard == (i+1)%2]
-
+    accept = MC_step_loop(arr, nmax, Ts, xran, yran, aran)
     return accept/(nmax*nmax)
+#=======================================================================
+@numba.jit(nopython = True, parallel = True)
+def MC_step_loop(arr, nmax, Ts, xran, yran, aran):
+    accept = 0
+    for i in prange(nmax):
+        for j in range(nmax):
+            ix = xran[i,j]
+            iy = yran[i,j]
+            ang = aran[i,j]
+            en0 = one_energy(arr,ix,iy,nmax)
+            arr[ix,iy] += ang
+            en1 = one_energy(arr,ix,iy,nmax)
+            if en1<=en0:
+                accept += 1
+            else:
+            # Now apply the Monte Carlo test - compare
+            # exp( -(E_new - E_old) / T* ) >= rand(0,1)
+                boltz = np.exp( -(en1 - en0) / Ts )
+
+                if boltz >= np.random.uniform(0.0,1.0):
+                    accept += 1
+                else:
+                    arr[ix,iy] -= ang
+    return accept
 #=======================================================================
 def main(program, nsteps, nmax, temp, pflag):
     """
@@ -292,22 +294,19 @@ def main(program, nsteps, nmax, temp, pflag):
     ratio = np.zeros(nsteps+1,dtype=np.dtype)
     order = np.zeros(nsteps+1,dtype=np.dtype)
     '''
-    #create a grid of all possible lattice indexes
-    grid = np.mgrid[0:nmax,0:nmax].reshape(2,-1).T
-
     energy = np.zeros(nsteps+1)
     ratio = np.zeros(nsteps+1)
     order = np.zeros(nsteps+1)
     # Set initial values in arrays
-    energy[0] = all_energy(lattice,nmax, grid)
+    energy[0] = all_energy(lattice,nmax)
     ratio[0] = 0.5 # ideal value
     order[0] = get_order(lattice,nmax)
 
     # Begin doing and timing some MC steps.
     initial = time.time()
     for it in range(1,nsteps+1):
-        ratio[it] = MC_step(lattice,temp,nmax, grid)
-        energy[it] = all_energy(lattice,nmax,grid)
+        ratio[it] = MC_step(lattice,temp,nmax)
+        energy[it] = all_energy(lattice,nmax)
         order[it] = get_order(lattice,nmax)
     final = time.time()
     runtime = final-initial
@@ -317,9 +316,6 @@ def main(program, nsteps, nmax, temp, pflag):
     # Plot final frame of lattice and generate output file
     savedat(lattice,nsteps,temp,runtime,ratio,energy,order,nmax)
     plotdat(lattice,pflag,nmax)
-    #fig, ax = plt.subplots()
-    #ax.plot(np.arange(nsteps+1), order)
-    #plt.show(block=True)
 #=======================================================================
 # Main part of program, getting command line arguments and calling
 # main simulation function.

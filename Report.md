@@ -73,19 +73,6 @@ This was the easiest to implement, as it only required a few lines of code and t
 **Figure 5:** Numba with and without MPI. When iterations were changed, the lattice was 50 x 50, and when lattice size was changed, the iterations were 200. Only Numba MPI with 4 cores was faster than the original Numba code, which must be due to the mpi4py processes which slow the program down.
 
 <div>
-<style scoped>
-    .dataframe tbody tr th:only-of-type {
-        vertical-align: middle;
-    }
-
-    .dataframe tbody tr th {
-        vertical-align: top;
-    }
-
-    .dataframe thead th {
-        text-align: right;
-    }
-</style>
 <table border="1" class="dataframe">
   <thead>
     <tr style="text-align: right;">
@@ -150,4 +137,11 @@ This was the easiest to implement, as it only required a few lines of code and t
 Cython with MPI gives by far the largest speedup, ~200 times quicker than the original code, but is the hardest to implement. The best optimisation for speedup whilst being easy to implement is Numba, which resulted in a speedup of ~45 times quicker than the original code, but is not parallel so may not work with supercomputers with a large number of cores.
 
 Overall, Cython with MPI is the best option if an iterative program is needed to run as fast as possible on multiple cores. This is due to it being compiled with C, making it very fast, and because of the flexiblity with MPI parallelisation.
+
+
+## Instructions on running the programs:
+* Each program is inside its respective folder (LL_mpi, LL_numpy etc)
+* To run the python 
+
+## Github link:
 
